@@ -6,7 +6,7 @@ class ShipmentProcessor:
 
     def process_shipment(self, item_name, quantity, log_callback):
         """
-        Executes the shipment logic.
+        Executes the shipment logic atomically.
         :param item_name: Name of the item
         :param quantity: Amount to move
         :param log_callback: A function to print to the GUI console
@@ -16,34 +16,47 @@ class ShipmentProcessor:
 
         log_callback(f"--- STARTING TRANSACTION: Move {quantity} of {item_name} ---")
 
-        # ==============================================================================
-        # STUDENT TODO: Fix the Transaction Logic below.
-        # Currently, if Step 1 fails, Step 2 still runs, creating a "Ghost Shipment".
-        # Ensure the operation is ATOMIC (All or Nothing).
-        # ==============================================================================
+        # Start a transaction explicitly
+        conn.execute("BEGIN")
 
         try:
-            # STEP 1: Update Inventory
-            # This will raise sqlite3.IntegrityError if stock becomes negative
-            cursor.execute("UPDATE inventory SET stock_qty = stock_qty - ? WHERE item_name = ?", 
-                           (quantity, item_name))
+            # STEP 1: Check current stock
+            cursor.execute(
+                "SELECT stock_qty FROM inventory WHERE item_name = ?",
+                (item_name,)
+            )
+            result = cursor.fetchone()
+            if result is None:
+                raise ValueError(f"Item '{item_name}' does not exist.")
+            current_stock = result[0]
+
+            if current_stock < quantity:
+                raise ValueError(
+                    f"Insufficient stock for '{item_name}'. Available: {current_stock}, requested: {quantity}"
+                )
+
+            # STEP 2: Deduct inventory
+            cursor.execute(
+                "UPDATE inventory SET stock_qty = stock_qty - ? WHERE item_name = ?",
+                (quantity, item_name)
+            )
             log_callback(">> STEP 1 SUCCESS: Inventory Deducted.")
 
-        except sqlite3.IntegrityError as e:
-            log_callback(f">> STEP 1 FAILED: {e}") 
-            # Hint: The code doesn't stop here! It continues to Step 2!
-
-        try:
-            # STEP 2: Log the Shipment
-            cursor.execute("INSERT INTO shipment_log (item_name, qty_moved) VALUES (?, ?)", 
-                           (item_name, quantity))
+            # STEP 3: Log the shipment
+            cursor.execute(
+                "INSERT INTO shipment_log (item_name, qty_moved) VALUES (?, ?)",
+                (item_name, quantity)
+            )
             log_callback(">> STEP 2 SUCCESS: Shipment Logged.")
-        
-        except Exception as e:
-             log_callback(f">> STEP 2 FAILED: {e}")
 
-        # Final Commit
-        conn.commit()
-        log_callback("--- TRANSACTION COMMITTED ---")
-        
-        conn.close()
+            # Commit transaction
+            conn.commit()
+            log_callback("--- TRANSACTION COMMITTED ---")
+
+        except Exception as e:
+            # Rollback on any error
+            conn.rollback()
+            log_callback(f">> TRANSACTION FAILED: {e} - No changes were made.")
+
+        finally:
+            conn.close()
